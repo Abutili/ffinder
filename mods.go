@@ -1,42 +1,73 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run main.go <path>")
-		os.Exit(1)
+	// Command-line flags
+	path := flag.String("path", ".", "The path to search recursively")
+	daysAgo := flag.Int("days", 7, "Number of days ago from now to consider modification time")
+	poolSize := flag.Int("poolsize", 5, "Size of the goroutine pool")
+
+	flag.Parse()
+
+	// Parse the path and get absolute path
+	absPath, err := filepath.Abs(*path)
+	if err != nil {
+		fmt.Println("Error parsing the path:", err)
+		return
 	}
 
-	path := os.Args[1]
-	findFilesModifiedWithinLastWeek(path)
-}
+	// Get current time and time limit (days ago)
+	now := time.Now()
+	timeLimit := now.AddDate(0, 0, -*daysAgo)
 
-func findFilesModifiedWithinLastWeek(path string) {
-	fmt.Printf("Finding files modified within the last week in: %s\n", path)
+	// Channel for collecting found files
+	filesFound := make(chan string)
 
-	err := filepath.Walk(path, func(filePath string, info os.FileInfo, err error) error {
+	// WaitGroup to wait for all goroutines to finish
+	var wg sync.WaitGroup
+
+	// Create a pool of goroutines
+	for i := 0; i < *poolSize; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for file := range filesFound {
+				checkModifiedTime(file, timeLimit)
+			}
+		}()
+	}
+
+	// Traverse the directory tree recursively
+	err = filepath.Walk(absPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-
-		// Check if the file was modified within the last week
-		modifiedTime := info.ModTime()
-		oneWeekAgo := time.Now().AddDate(0, 0, -7)
-
-		if modifiedTime.After(oneWeekAgo) {
-			fmt.Println(filePath)
+		if !info.IsDir() {
+			filesFound <- path
 		}
-
 		return nil
 	})
 
+	close(filesFound)
+	wg.Wait()
+}
+
+func checkModifiedTime(file string, timeLimit time.Time) {
+	info, err := os.Stat(file)
 	if err != nil {
-		fmt.Printf("Error: %s\n", err)
+		fmt.Println("Error reading file info:", err)
+		return
+	}
+	modTime := info.ModTime()
+	if modTime.After(timeLimit) {
+		fmt.Println(file)
 	}
 }
